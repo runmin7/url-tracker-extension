@@ -11,6 +11,13 @@
   if (legacyRoot) legacyRoot.remove();
 
   const IS_TOP = window === window.top;
+  const IS_POPUP_INITIAL = (() => {
+    try {
+      return Boolean(window.top && window.top.opener);
+    } catch {
+      return Boolean(window.opener);
+    }
+  })();
   const DEFAULT_ALLOWED_DOMAINS = [];
 
   function checkDomainMatch(hostname, domains) {
@@ -31,6 +38,8 @@
     hoverEnabled: true,
     paused: false,
     preserveLog: false,
+    isPopupWindow: IS_POPUP_INITIAL,
+    sidePanelOpen: false,
     currentHoverInfo: null,
     latestPreviewUrl: window.location.pathname + window.location.search,
     latestPreviewKind: '현재 화면'
@@ -72,6 +81,18 @@
           renderQuickBar();
         }
       );
+      if (IS_TOP) {
+        chrome.runtime.sendMessage({ type: 'URL_TRACKER_GET_UI_STATE' }, (uiRes) => {
+          if (chrome.runtime.lastError || !uiRes) return;
+          if (typeof uiRes.isPopupWindow === 'boolean') {
+            state.isPopupWindow = state.isPopupWindow || uiRes.isPopupWindow;
+          }
+          if (typeof uiRes.sidePanelOpen === 'boolean') {
+            state.sidePanelOpen = uiRes.sidePanelOpen;
+          }
+          renderQuickBar();
+        });
+      }
     } catch {}
   }
 
@@ -618,6 +639,16 @@
       .qb-btn.primary:hover {
         filter: brightness(1.1);
       }
+      .qb-btn.close-mode {
+        background: rgba(185, 28, 28, 0.85);
+        border-color: rgba(248, 113, 113, 0.55);
+        color: #ffffff;
+        font-weight: 700;
+        padding: 6px 12px;
+      }
+      .qb-btn.close-mode:hover {
+        background: rgba(220, 38, 38, 0.95);
+      }
     `;
 
     quickBarEl = document.createElement('div');
@@ -672,7 +703,11 @@
     openBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       try {
-        chrome.runtime.sendMessage({ type: 'URL_TRACKER_OPEN_SIDEPANEL' }).catch(() => {});
+        if (state.sidePanelOpen) {
+          chrome.runtime.sendMessage({ type: 'URL_TRACKER_CLOSE_SIDEPANEL' }).catch(() => {});
+        } else {
+          chrome.runtime.sendMessage({ type: 'URL_TRACKER_OPEN_SIDEPANEL' }).catch(() => {});
+        }
       } catch {}
     });
 
@@ -707,6 +742,7 @@
     const urlEl = bar.querySelector('[data-role="url"]');
     const hoverBtn = bar.querySelector('[data-role="hover-btn"]');
     const preserveBtn = bar.querySelector('[data-role="preserve-btn"]');
+    const openBtn = bar.querySelector('[data-role="open-btn"]');
 
     if (dot) {
       dot.classList.toggle('off', !state.hoverEnabled && state.paused);
@@ -733,6 +769,25 @@
       preserveBtn.textContent = state.preserveLog ? '📌 로그보관 ON' : '📌 로그보관 OFF';
       preserveBtn.classList.toggle('active-amber', !!state.preserveLog);
     }
+
+    if (openBtn) {
+      if (state.isPopupWindow) {
+        openBtn.style.display = 'none';
+      } else {
+        openBtn.style.display = 'inline-block';
+        if (state.sidePanelOpen) {
+          openBtn.textContent = '✕ 트래커 닫기';
+          openBtn.classList.remove('primary');
+          openBtn.classList.add('close-mode');
+          openBtn.title = '우측 사이드 패널 닫기 (단축키: Alt+Q)';
+        } else {
+          openBtn.textContent = '🚀 트래커 열기';
+          openBtn.classList.remove('close-mode');
+          openBtn.classList.add('primary');
+          openBtn.title = '우측 사이드 패널에서 URL 트래커 열기 (단축키: Alt+Q)';
+        }
+      }
+    }
   }
 
   // 단축키: 허용된 도메인에서만 동작
@@ -758,7 +813,11 @@
       } else if (e.altKey && (e.key === 'q' || e.key === 'Q' || e.code === 'KeyQ')) {
         e.preventDefault();
         try {
-          chrome.runtime.sendMessage({ type: 'URL_TRACKER_OPEN_SIDEPANEL' }).catch(() => {});
+          if (state.sidePanelOpen) {
+            chrome.runtime.sendMessage({ type: 'URL_TRACKER_CLOSE_SIDEPANEL' }).catch(() => {});
+          } else {
+            chrome.runtime.sendMessage({ type: 'URL_TRACKER_OPEN_SIDEPANEL' }).catch(() => {});
+          }
         } catch {}
       }
     },
@@ -826,6 +885,11 @@
     } else if (msg?.type === 'URL_TRACKER_QUICKBAR_UPDATE') {
       if (msg.url) {
         updateQuickBarPreview(msg.url, msg.badge || '최근 URL');
+      }
+    } else if (msg?.type === 'URL_TRACKER_SIDEPANEL_STATE') {
+      if (typeof msg.open === 'boolean') {
+        state.sidePanelOpen = msg.open;
+        renderQuickBar();
       }
     } else if (msg?.type === 'URL_TRACKER_SETTINGS_UPDATED' && msg.settings) {
       if (Array.isArray(msg.settings.allowedDomains)) {

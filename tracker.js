@@ -3,6 +3,16 @@
 (function () {
   const DEFAULT_ALLOWED_DOMAINS = [];
 
+  // 사이드 패널 열림/닫힘 상태를 background.js 및 하단 퀵 바와 실시간 동기화
+  try {
+    const sidePanelPort = chrome.runtime.connect({ name: 'url-tracker-sidepanel' });
+    sidePanelPort.onMessage.addListener((msg) => {
+      if (msg?.type === 'URL_TRACKER_CLOSE_SIDEPANEL') {
+        window.close();
+      }
+    });
+  } catch {}
+
   const btnToggleDomains = document.getElementById('btnToggleDomains');
   const btnToggleHover = document.getElementById('btnToggleHover');
   const btnTogglePause = document.getElementById('btnTogglePause');
@@ -359,6 +369,11 @@
   // 실시간 이벤트 수신
   chrome.runtime.onMessage.addListener((msg) => {
     if (!msg || typeof msg !== 'object') return;
+
+    if (msg.type === 'URL_TRACKER_CLOSE_SIDEPANEL') {
+      window.close();
+      return;
+    }
 
     if (msg.type === 'URL_TRACKER_ACTIVE_TAB_CHANGED') {
       state.activeTabId = msg.tabId;

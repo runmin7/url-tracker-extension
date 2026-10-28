@@ -9,6 +9,43 @@ const MAX_LOGS_PER_TAB = 200;
 let allowedDomains = [...DEFAULT_ALLOWED_DOMAINS];
 let preserveLog = false; // 크롬 DevTools Preserve log (기본값: OFF - 화면 이동 시 자동 리셋)
 let lastActiveWebTabId = null;
+const activeSidePanelPorts = new Set();
+
+function isSidePanelOpen() {
+  return activeSidePanelPorts.size > 0;
+}
+
+function broadcastSidePanelState(open) {
+  chrome.tabs.query({}, (tabs) => {
+    for (const tab of tabs || []) {
+      if (tab.id != null) {
+        chrome.tabs
+          .sendMessage(
+            tab.id,
+            {
+              type: 'URL_TRACKER_SIDEPANEL_STATE',
+              open
+            },
+            { frameId: 0 }
+          )
+          .catch(() => {});
+      }
+    }
+  });
+}
+
+if (chrome.runtime?.onConnect) {
+  chrome.runtime.onConnect.addListener((port) => {
+    if (port.name === 'url-tracker-sidepanel') {
+      activeSidePanelPorts.add(port);
+      broadcastSidePanelState(true);
+      port.onDisconnect.addListener(() => {
+        activeSidePanelPorts.delete(port);
+        broadcastSidePanelState(isSidePanelOpen());
+      });
+    }
+  });
+}
 
 function initSidePanelBehavior() {
   if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
@@ -374,7 +411,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
-  // 6) 단축키(Alt+Q) 또는 우측 하단 퀵 바 '트래커 열기' 버튼으로 우측 사이드 패널 열기 요청
+  // 6) 단축키(Alt+Q) 또는 우측 하단 퀵 바 '트래커 열기 / 닫기' 버튼 요청
   if (message?.type === 'URL_TRACKER_OPEN_SIDEPANEL') {
     if (isFromPopup && tabId != null) {
       chrome.tabs
@@ -393,6 +430,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     sendResponse({ ok: true });
     return false;
+  }
+
+  if (message?.type === 'URL_TRACKER_CLOSE_SIDEPANEL') {
+    for (const port of activeSidePanelPorts) {
+      try {
+        port.postMessage({ type: 'URL_TRACKER_CLOSE_SIDEPANEL' });
+      } catch {}
+    }
+    broadcastToSidePanel({ type: 'URL_TRACKER_CLOSE_SIDEPANEL' });
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message?.type === 'URL_TRACKER_GET_UI_STATE') {
+    isPopupWindowTab(senderTab).then((popup) => {
+      sendResponse({
+        isPopupWindow: Boolean(popup || isFromPopup),
+        sidePanelOpen: isSidePanelOpen()
+      });
+    });
+    return true;
   }
 
   // 7) 설정 변경(호버 ON/OFF, 일시정지, 로그 보관, 허용 도메인 목록) 브로드캐스트
