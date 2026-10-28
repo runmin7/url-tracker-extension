@@ -715,4 +715,29 @@
       });
     });
   }
+
+  // 사이드 패널에 포커스가 있을 때도 Alt+C 즉시 복사 지원
+  window.addEventListener('keydown', async (e) => {
+    if (e.altKey && (e.key === 'c' || e.key === 'C' || e.code === 'KeyC')) {
+      const hoverUrl = state.latestHover?.candidates?.[0]?.displayUrl;
+      const fallbackUrl = state.logs?.[0]?.displayUrl;
+      const targetUrl = hoverUrl || fallbackUrl;
+      if (!targetUrl) return;
+      e.preventDefault();
+      await copyToClipboard(targetUrl);
+      const hoverCopyBtn = hoverSection?.querySelector('[data-copy]');
+      if (hoverCopyBtn && hoverUrl) {
+        flashButtonCopied(hoverCopyBtn, '✅ 복사완료!');
+      }
+      if (state.activeTabId != null) {
+        chrome.runtime
+          .sendMessage({
+            type: 'URL_TRACKER_QUICKBAR_COPIED',
+            tabId: state.activeTabId,
+            url: targetUrl
+          })
+          .catch(() => {});
+      }
+    }
+  });
 })();

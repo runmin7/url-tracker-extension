@@ -359,7 +359,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       tabId,
       payload: message.payload
     });
-    const firstHoverUrl = message.payload?.candidates?.[0]?.displayUrl;
+    const firstCandidate = message.payload?.candidates?.[0];
+    const firstHoverUrl = firstCandidate?.displayUrl;
     if (firstHoverUrl) {
       chrome.tabs
         .sendMessage(
@@ -367,12 +368,59 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           {
             type: 'URL_TRACKER_QUICKBAR_UPDATE',
             url: firstHoverUrl,
-            badge: '호버'
+            badge: '호버',
+            kind: firstCandidate?.kind || '호버 URL',
+            elementText:
+              message.payload?.element?.text ||
+              message.payload?.element?.selector ||
+              '요소',
+            isHover: true
           },
           { frameId: 0 }
         )
         .catch(() => {});
     }
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  // 3-1) 자식 프레임에서 Alt+C 복사 또는 Shift 홀드 상태 동기화
+  if (message?.type === 'URL_TRACKER_QUICKBAR_COPIED' && rawTabId != null) {
+    chrome.tabs
+      .sendMessage(
+        rawTabId,
+        {
+          type: 'URL_TRACKER_QUICKBAR_COPIED',
+          url: message.url
+        },
+        { frameId: 0 }
+      )
+      .catch(() => {});
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message?.type === 'URL_TRACKER_TRIGGER_TOP_COPY' && rawTabId != null) {
+    chrome.tabs
+      .sendMessage(
+        rawTabId,
+        {
+          type: 'URL_TRACKER_TRIGGER_TOP_COPY'
+        },
+        { frameId: 0 }
+      )
+      .catch(() => {});
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (message?.type === 'URL_TRACKER_SHIFT_LOCK_STATE' && rawTabId != null) {
+    chrome.tabs
+      .sendMessage(rawTabId, {
+        type: 'URL_TRACKER_SHIFT_LOCK_STATE',
+        locked: Boolean(message.locked)
+      })
+      .catch(() => {});
     sendResponse({ ok: true });
     return false;
   }

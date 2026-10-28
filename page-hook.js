@@ -1788,6 +1788,8 @@
     'mouseover',
     (e) => {
       if (!isDomainAllowed) return;
+      // Shift 키를 누르고 있는 동안에는 호버 대상 변경 및 초기화를 중단하여 현재 URL 고정
+      if (e.shiftKey) return;
       try {
         const el = findActionableElement(e.target);
         if (el === lastHoveredEl) return;
