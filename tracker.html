@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Web URL & Ajax 실시간 트래커</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/icon32.png" />
+  <style>
+    * {
+      box-sizing: border-box;
+      font-family: 'Pretendard', 'Malgun Gothic', -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: #0f172a;
+      color: #f8fafc;
+      font-size: 12.5px;
+    }
+    .app-wrap {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+    /* 상단 헤더 */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      padding: 10px 12px;
+      background: #1e293b;
+      border-bottom: 1px solid rgba(56, 189, 248, 0.3);
+      flex-shrink: 0;
+    }
+    .brand-title {
+      font-size: 13px;
+      font-weight: 800;
+      color: #38bdf8;
+      white-space: nowrap;
+    }
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .btn {
+      cursor: pointer;
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      background: #0f172a;
+      color: #cbd5e1;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 4px 7px;
+      border-radius: 6px;
+      transition: all 0.12s;
+      white-space: nowrap;
+    }
+    .btn:hover {
+      background: #334155;
+      color: #fff;
+    }
+    .btn.active {
+      background: #0284c7;
+      border-color: #38bdf8;
+      color: #fff;
+    }
+    .btn.warn {
+      background: #b91c1c;
+      border-color: #f87171;
+      color: #fff;
+    }
+
+    /* 허용 도메인 관리 패널 (접기/펼치기) */
+    .domain-panel {
+      display: none;
+      padding: 10px 12px;
+      background: #131c31;
+      border-bottom: 1px solid rgba(56, 189, 248, 0.35);
+      flex-shrink: 0;
+    }
+    .domain-panel.open {
+      display: block;
+    }
+    .domain-title {
+      font-size: 11.5px;
+      font-weight: 700;
+      color: #7dd3fc;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .domain-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      margin-bottom: 8px;
+    }
+    .dchip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      background: rgba(15, 23, 42, 0.9);
+      border: 1px solid rgba(56, 189, 248, 0.45);
+      color: #e0f2fe;
+      font-family: Consolas, monospace;
+      font-size: 11.5px;
+      padding: 3px 7px;
+      border-radius: 5px;
+    }
+    .dchip button {
+      cursor: pointer;
+      border: none;
+      background: transparent;
+      color: #94a3b8;
+      font-size: 11px;
+      padding: 0 2px;
+      line-height: 1;
+    }
+    .dchip button:hover {
+      color: #f87171;
+    }
+    .domain-input-row {
+      display: flex;
+      gap: 5px;
+    }
+    .domain-input {
+      flex: 1;
+      background: #0f172a;
+      border: 1px solid #334155;
+      color: #f8fafc;
+      font-size: 11.5px;
+      padding: 5px 8px;
+      border-radius: 6px;
+      outline: none;
+    }
+    .domain-input:focus {
+      border-color: #38bdf8;
+    }
+    .quick-domain-btn {
+      width: 100%;
+      margin-bottom: 7px;
+      cursor: pointer;
+      border: 1px solid rgba(56, 189, 248, 0.55);
+      background: linear-gradient(135deg, rgba(2, 132, 199, 0.85), rgba(37, 99, 235, 0.85));
+      color: #ffffff;
+      font-size: 11.5px;
+      font-weight: 700;
+      padding: 6px 10px;
+      border-radius: 6px;
+      text-align: center;
+      transition: all 0.15s ease;
+    }
+    .quick-domain-btn:hover {
+      filter: brightness(1.1);
+    }
+    .quick-domain-btn.registered {
+      background: rgba(16, 185, 129, 0.18);
+      border-color: rgba(16, 185, 129, 0.45);
+      color: #6ee7b7;
+      cursor: default;
+    }
+
+    /* 미등록 도메인 접속 시 안내 배너 */
+    .unallowed-banner {
+      display: none;
+      margin: 10px 12px 0 12px;
+      padding: 11px 12px;
+      background: rgba(245, 158, 11, 0.12);
+      border: 1px solid rgba(245, 158, 11, 0.45);
+      border-radius: 8px;
+      color: #fde68a;
+      font-size: 11.5px;
+      line-height: 1.5;
+      flex-shrink: 0;
+    }
+    .unallowed-banner.show {
+      display: block;
+    }
+    .add-current-btn {
+      margin-top: 7px;
+      cursor: pointer;
+      border: 1px solid #38bdf8;
+      background: #0284c7;
+      color: #fff;
+      font-size: 11.5px;
+      font-weight: 700;
+      padding: 5px 10px;
+      border-radius: 6px;
+    }
+    .add-current-btn:hover {
+      background: #0369a1;
+    }
+
+    /* 실시간 마우스 호버(Hover) 고정 박스 */
+    .hover-section {
+      padding: 9px 12px;
+      background: rgba(16, 185, 129, 0.08);
+      border-bottom: 1px solid rgba(16, 185, 129, 0.3);
+      flex-shrink: 0;
+    }
+    .hover-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      margin-bottom: 4px;
+    }
+    .hover-title {
+      font-size: 11.5px;
+      font-weight: 800;
+      color: #6ee7b7;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .hover-url {
+      font-family: Consolas, Monaco, 'Courier New', monospace;
+      font-size: 12.5px;
+      font-weight: 700;
+      color: #fde047;
+      word-break: break-all;
+      user-select: all;
+    }
+
+    /* 필터 & 검색 바 */
+    .toolbar {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      padding: 9px 12px;
+      background: #111827;
+      border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+      flex-shrink: 0;
+    }
+    .tabs {
+      display: flex;
+      gap: 4px;
+    }
+    .tab-btn {
+      flex: 1;
+      cursor: pointer;
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      background: rgba(30, 41, 59, 0.7);
+      color: #94a3b8;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 5px 4px;
+      border-radius: 6px;
+      text-align: center;
+      white-space: nowrap;
+    }
+    .tab-btn.active {
+      background: rgba(14, 165, 233, 0.22);
+      color: #38bdf8;
+      border-color: rgba(56, 189, 248, 0.55);
+    }
+    .search-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .search-input {
+      flex: 1;
+      background: #0f172a;
+      border: 1px solid #334155;
+      color: #f8fafc;
+      font-size: 12px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      outline: none;
+    }
+    .search-input:focus {
+      border-color: #38bdf8;
+    }
+    .preserve-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11.5px;
+      font-weight: 700;
+      color: #cbd5e1;
+      cursor: pointer;
+      white-space: nowrap;
+      user-select: none;
+      padding: 4px 7px;
+      border-radius: 6px;
+      border: 1px solid rgba(148, 163, 184, 0.25);
+      background: rgba(30, 41, 59, 0.7);
+    }
+    .preserve-label:hover {
+      border-color: #38bdf8;
+      color: #fff;
+    }
+    .preserve-label.active {
+      background: rgba(14, 165, 233, 0.2);
+      border-color: rgba(56, 189, 248, 0.55);
+      color: #38bdf8;
+    }
+    .preserve-label input {
+      margin: 0;
+      accent-color: #0284c7;
+      cursor: pointer;
+    }
+
+    /* 메인 로그 리스트 */
+    .log-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .empty {
+      text-align: center;
+      color: #64748b;
+      padding: 36px 14px;
+      font-size: 12px;
+      line-height: 1.6;
+      border: 1px dashed #334155;
+      border-radius: 10px;
+    }
+    .log-item {
+      background: rgba(30, 41, 59, 0.82);
+      border: 1px solid rgba(71, 85, 105, 0.55);
+      border-radius: 8px;
+      padding: 9px 11px;
+    }
+    .log-item:first-child {
+      border-color: rgba(56, 189, 248, 0.65);
+      background: linear-gradient(180deg, rgba(14, 165, 233, 0.12) 0%, rgba(30, 41, 59, 0.88) 100%);
+    }
+    .item-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      margin-bottom: 5px;
+      cursor: pointer;
+    }
+    .badges {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      flex-wrap: wrap;
+    }
+    .badge {
+      font-size: 10.5px;
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 4px;
+    }
+    .badge.nav {
+      background: rgba(16, 185, 129, 0.2);
+      color: #6ee7b7;
+      border: 1px solid rgba(16, 185, 129, 0.45);
+    }
+    .badge.iframe {
+      background: rgba(168, 85, 247, 0.22);
+      color: #d8b4fe;
+      border: 1px solid rgba(168, 85, 247, 0.45);
+    }
+    .badge.ajax {
+      background: rgba(59, 130, 246, 0.22);
+      color: #93c5fd;
+      border: 1px solid rgba(59, 130, 246, 0.45);
+    }
+    .badge.post {
+      background: rgba(245, 158, 11, 0.22);
+      color: #fcd34d;
+      border: 1px solid rgba(245, 158, 11, 0.45);
+    }
+    .click-tag {
+      font-size: 11px;
+      color: #e2e8f0;
+      background: rgba(51, 65, 85, 0.85);
+      padding: 1px 6px;
+      border-radius: 4px;
+    }
+    .time {
+      font-size: 11px;
+      color: #94a3b8;
+      font-family: Consolas, monospace;
+      white-space: nowrap;
+    }
+    .url-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .url-text {
+      font-family: Consolas, Monaco, 'Courier New', monospace;
+      font-size: 12.5px;
+      font-weight: 700;
+      color: #fde047;
+      word-break: break-all;
+      cursor: pointer;
+      flex: 1;
+      user-select: all;
+    }
+    .mini-btns {
+      display: flex;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+    .mini-btn {
+      cursor: pointer;
+      border: 1px solid rgba(56, 189, 248, 0.4);
+      background: rgba(2, 132, 199, 0.22);
+      color: #e0f2fe;
+      font-size: 10.5px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 4px;
+    }
+    .mini-btn:hover {
+      background: #0284c7;
+      color: #fff;
+    }
+    .mini-btn.copied {
+      background: #059669 !important;
+      border-color: #10b981 !important;
+      color: #fff !important;
+    }
+    .preview-params {
+      margin-top: 5px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+    .pchip {
+      font-family: Consolas, monospace;
+      font-size: 11px;
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid rgba(100, 116, 139, 0.4);
+      padding: 1px 5px;
+      border-radius: 4px;
+      color: #cbd5e1;
+      cursor: pointer;
+    }
+    .pchip:hover {
+      border-color: #38bdf8;
+    }
+    .pchip .k { color: #93c5fd; }
+    .pchip .v { color: #fca5a5; }
+
+    /* 상세 파라미터 테이블 */
+    .details {
+      margin-top: 8px;
+      padding-top: 8px;
+      border-top: 1px dashed rgba(148, 163, 184, 0.25);
+      font-size: 11.5px;
+    }
+    .detail-sec {
+      margin-bottom: 7px;
+    }
+    .detail-sec:last-child {
+      margin-bottom: 0;
+    }
+    .detail-title {
+      font-weight: 700;
+      color: #38bdf8;
+      margin-bottom: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .param-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-family: Consolas, monospace;
+      font-size: 11.5px;
+      background: rgba(2, 6, 23, 0.65);
+      border-radius: 5px;
+      overflow: hidden;
+    }
+    .param-table td {
+      padding: 4px 7px;
+      border-bottom: 1px solid rgba(51, 65, 85, 0.5);
+      word-break: break-all;
+      vertical-align: top;
+    }
+    .param-table td.k {
+      width: 34%;
+      color: #93c5fd;
+      font-weight: 600;
+      background: rgba(15, 23, 42, 0.6);
+    }
+    .param-table td.v {
+      color: #fde68a;
+    }
+  </style>
+</head>
+<body>
+  <div class="app-wrap">
+    <!-- 상단 헤더 -->
+    <header class="header">
+      <div class="brand-title">📡 URL & Ajax 트래커</div>
+      <div class="header-actions">
+        <button id="btnToggleDomains" class="btn" title="실행 허용 도메인 관리">🌐 도메인</button>
+        <button id="btnToggleHover" class="btn active" title="웹 화면 위 마우스 오버 URL 툴팁 ON/OFF">🔍 호버 ON</button>
+        <button id="btnTogglePause" class="btn" title="트래킹 일시정지 / 재개">⏸ 일시정지</button>
+        <button id="btnClearLogs" class="btn" title="현재 기록 비우기">🗑️ 비우기</button>
+      </div>
+    </header>
+
+    <!-- 허용 도메인 관리 패널 (🌐 도메인 버튼 클릭 시 열림) -->
+    <section id="domainPanel" class="domain-panel">
+      <div class="domain-title">
+        <span>🌐 실행 허용 도메인 목록 (등록된 사이트에서만 동작)</span>
+      </div>
+      <button type="button" id="btnQuickRegisterCurrent" class="quick-domain-btn">
+        ⚡ 현재 접속한 페이지 도메인 바로 등록
+      </button>
+      <div id="domainChips" class="domain-chips"></div>
+      <div class="domain-input-row">
+        <input
+          type="text"
+          id="domainInput"
+          class="domain-input"
+          placeholder="추가할 도메인 입력 (예: example.com, *.example.com, localhost)"
+        />
+        <button id="btnAddDomain" class="btn active">+ 추가</button>
+      </div>
+    </section>
+
+    <!-- 미등록 사이트 접속 시 안내 배너 -->
+    <section id="unallowedBanner" class="unallowed-banner"></section>
+
+    <!-- 실시간 마우스 호버(Hover) 요소 표시 영역 -->
+    <section id="hoverSection" class="hover-section">
+      <div class="hover-head">
+        <span class="hover-title">🎯 마우스 호버 URL 미리보기</span>
+      </div>
+      <div style="color:#64748b;font-size:11.5px;">웹 화면에서 버튼·메뉴·DataTables 목록 행에 마우스를 올리면 표시됩니다.</div>
+    </section>
+
+    <!-- 필터 & 검색 바 -->
+    <section class="toolbar">
+      <div class="tabs">
+        <button class="tab-btn active" data-filter="ALL" id="tabAll">전체 (0)</button>
+        <button class="tab-btn" data-filter="NAV" id="tabNav">🚀 페이지 이동 (0)</button>
+        <button class="tab-btn" data-filter="IFRAME" id="tabIframe">🖼️ IFRAME 전환 (0)</button>
+        <button class="tab-btn" data-filter="AJAX" id="tabAjax">⚡ Ajax 호출 (0)</button>
+      </div>
+      <div class="search-row">
+        <input
+          type="text"
+          id="searchInput"
+          class="search-input"
+          placeholder="URL, 파라미터(예: docNo), 클릭 버튼명 검색..."
+        />
+        <label
+          id="preserveLogLabel"
+          class="preserve-label"
+          title="크롬 DevTools의 Preserve log와 동일: 체크 시 화면 전환/새로고침에도 로그 유지, 해제 시 화면 전환마다 이전 로그 리셋"
+        >
+          <input type="checkbox" id="chkPreserveLog" />
+          <span>로그 보관</span>
+        </label>
+      </div>
+    </section>
+
+    <!-- 메인 로그 리스트 -->
+    <main id="logList" class="log-list"></main>
+  </div>
+
+  <script src="tracker.js"></script>
+</body>
+</html>

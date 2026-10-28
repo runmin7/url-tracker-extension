@@ -1,0 +1,68 @@
+{
+  "manifest_version": 3,
+  "name": "Web URL & Ajax 실시간 트래커",
+  "version": "1.2.0",
+  "minimum_chrome_version": "116",
+  "description": "버튼/링크/DataTables 마우스 오버 시 이동 URL을 미리 보여주고 복사하며, 클릭 시 발생하는 페이지 이동·IFRAME 전환·팝업·Ajax URL과 파라미터를 실시간 표시합니다.",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": [
+    "storage",
+    "activeTab",
+    "tabs",
+    "scripting",
+    "sidePanel"
+  ],
+  "side_panel": {
+    "default_path": "tracker.html"
+  },
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Web URL & Ajax 실시간 트래커 (우측 사이드 패널 열기)",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["page-hook.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "ISOLATED"
+    }
+  ],
+  "commands": {
+    "toggle-panel": {
+      "suggested_key": {
+        "default": "Alt+Shift+U"
+      },
+      "description": "우측 사이드 패널 열기"
+    },
+    "toggle-hover": {
+      "suggested_key": {
+        "default": "Alt+Shift+H"
+      },
+      "description": "마우스 오버 URL 미리보기 ON/OFF"
+    }
+  }
+}
