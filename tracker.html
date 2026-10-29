@@ -229,6 +229,121 @@
       user-select: all;
     }
 
+    /* 마우스 탐색 / 실제 동작 영역 구분 라벨 */
+    .section-label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 6px;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.2px;
+    }
+    .section-label .sub {
+      font-weight: 400;
+      color: #94a3b8;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .section-label.explore {
+      color: #34d399;
+    }
+    .section-label.action {
+      color: #38bdf8;
+      margin-bottom: 0;
+    }
+
+    /* 최근 마우스 탐색(호버) URL 목록 */
+    .hover-history {
+      margin-top: 8px;
+      padding-top: 7px;
+      border-top: 1px dashed rgba(16, 185, 129, 0.3);
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .hh-title {
+      font-size: 11px;
+      font-weight: 700;
+      color: #6ee7b7;
+      margin-bottom: 2px;
+    }
+    .hh-empty {
+      font-size: 11px;
+      color: #64748b;
+    }
+    .hh-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 7px;
+      border-radius: 6px;
+      background: rgba(6, 78, 59, 0.25);
+      border: 1px solid rgba(16, 185, 129, 0.22);
+      cursor: pointer;
+      min-width: 0;
+    }
+    .hh-item:hover {
+      border-color: rgba(52, 211, 153, 0.7);
+      background: rgba(6, 95, 70, 0.4);
+    }
+    .hh-idx {
+      font-size: 10.5px;
+      font-weight: 700;
+      color: #94a3b8;
+      flex-shrink: 0;
+    }
+    .hh-el {
+      font-size: 11px;
+      font-weight: 700;
+      color: #e2e8f0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 110px;
+      flex-shrink: 0;
+    }
+    .hh-item .click-tag {
+      flex: 0 1 auto;
+      max-width: 90px;
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .hh-item.repeated {
+      border-left: 3px solid #34d399;
+    }
+    /* URL 바로 뒤에 재방문 횟수를 붙이고, 시간·복사 버튼만 우측 끝으로 보냄 */
+    .hh-url {
+      flex: 0 1 auto;
+      min-width: 0;
+      font-family: Consolas, Monaco, 'Courier New', monospace;
+      font-size: 11.5px;
+      font-weight: 600;
+      color: #fde047;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .hh-repeat {
+      font-size: 10.5px;
+      font-weight: 800;
+      color: #052e16;
+      background: #34d399;
+      padding: 0 6px;
+      border-radius: 999px;
+      flex-shrink: 0;
+    }
+    .hh-item .time {
+      flex-shrink: 0;
+      margin-left: auto;
+    }
+    .hh-item .mini-btn {
+      flex-shrink: 0;
+    }
+
     /* 필터 & 검색 바 */
     .toolbar {
       display: flex;
@@ -535,16 +650,27 @@
     <!-- 미등록 사이트 접속 시 안내 배너 -->
     <section id="unallowedBanner" class="unallowed-banner"></section>
 
-    <!-- 실시간 마우스 호버(Hover) 요소 표시 영역 -->
-    <section id="hoverSection" class="hover-section">
-      <div class="hover-head">
-        <span class="hover-title">🎯 마우스 호버 URL 미리보기</span>
+    <!-- 마우스 탐색 영역: 실제 호출 없이 마우스로 훑어본 URL (상단 고정) -->
+    <section class="hover-section">
+      <div class="section-label explore">
+        <span>👀 마우스 탐색</span>
+        <span class="sub">실제 호출 아님 · 🗑️ 비우기로만 초기화</span>
       </div>
-      <div style="color:#64748b;font-size:11.5px;">웹 화면에서 버튼·메뉴·DataTables 목록 행에 마우스를 올리면 표시됩니다.</div>
+      <div id="hoverSection">
+        <div class="hover-head">
+          <span class="hover-title">🎯 마우스 호버 URL 미리보기</span>
+        </div>
+        <div style="color:#64748b;font-size:11.5px;">웹 화면에서 버튼·메뉴·DataTables 목록 행에 마우스를 올리면 표시됩니다.</div>
+      </div>
+      <div id="hoverHistory" class="hover-history"></div>
     </section>
 
     <!-- 필터 & 검색 바 -->
     <section class="toolbar">
+      <div class="section-label action">
+        <span>⚡ 실제 동작</span>
+        <span class="sub">페이지 이동 · IFRAME 전환 · Ajax 호출 기록</span>
+      </div>
       <div class="tabs">
         <button class="tab-btn active" data-filter="ALL" id="tabAll">전체 (0)</button>
         <button class="tab-btn" data-filter="NAV" id="tabNav">🚀 페이지 이동 (0)</button>

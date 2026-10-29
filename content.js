@@ -32,14 +32,13 @@
     return false;
   }
 
-  const MAX_RECENT_HOVERS = 5;
-
   const state = {
     allowedDomains: [...DEFAULT_ALLOWED_DOMAINS],
     domainAllowed: false,
     hoverEnabled: true,
     paused: false,
     preserveLog: false,
+    quickBarMinimized: false,
     isPopupWindow: IS_POPUP_INITIAL,
     sidePanelOpen: false,
     shiftLocked: false,
@@ -50,45 +49,32 @@
     latestPreviewKind: '현재 화면'
   };
 
-  function formatTimeNow() {
-    const d = new Date();
+  function formatTimeNow(timestamp = Date.now()) {
+    const d = new Date(timestamp);
     return [d.getHours(), d.getMinutes(), d.getSeconds()]
       .map((n) => String(n).padStart(2, '0'))
       .join(':');
   }
 
-  function pushRecentHover(url, kind, elementText) {
-    if (!url || typeof url !== 'string') return;
-    const trimmed = url.trim();
-    if (!trimmed || trimmed === '#') return;
-
-    const existingIdx = state.recentHovers.findIndex((item) => item.url === trimmed);
-    if (existingIdx >= 0) {
-      state.recentHovers.splice(existingIdx, 1);
-    }
-
-    state.recentHovers.unshift({
-      url: trimmed,
-      kind: kind || '호버 URL',
-      elementText: elementText || '요소',
-      time: formatTimeNow()
-    });
-
-    if (state.recentHovers.length > MAX_RECENT_HOVERS) {
-      state.recentHovers.length = MAX_RECENT_HOVERS;
-    }
+  // 최근 호버 목록은 background의 탭별 이력(트래커 창과 동일)을 그대로 받아 표시한다
+  function applyHoverHistory(hoverHistory) {
+    if (!Array.isArray(hoverHistory)) return;
+    state.recentHovers = hoverHistory.map((item) => ({
+      url: item.url,
+      kind: item.kind || '호버 URL',
+      elementText: item.elementText || '요소',
+      time: formatTimeNow(item.timestamp),
+      repeat: item.repeat || 0
+    }));
   }
 
   function syncDomainStateToPageHook() {
     state.domainAllowed = checkDomainMatch(window.location.hostname, state.allowedDomains);
     try {
-      window.postMessage(
-        {
-          source: 'URL_TRACKER_CONTENT',
-          type: 'SET_DOMAIN_ALLOWED',
-          allowed: state.domainAllowed
-        },
-        '*'
+      window.dispatchEvent(
+        new CustomEvent('__url_tracker_set_domain__', {
+          detail: JSON.stringify({ allowed: state.domainAllowed })
+        })
       );
     } catch {}
     if (!state.domainAllowed) {
@@ -100,7 +86,7 @@
   function loadSettings() {
     try {
       chrome.storage.local.get(
-        ['ut_allowedDomains', 'ut_hoverEnabled', 'ut_paused', 'ut_preserveLog'],
+        ['ut_allowedDomains', 'ut_hoverEnabled', 'ut_paused', 'ut_preserveLog', 'ut_quickBarMinimized', 'ut_historyOpen'],
         (res) => {
           if (Array.isArray(res.ut_allowedDomains)) {
             state.allowedDomains = res.ut_allowedDomains;
@@ -110,6 +96,8 @@
           if (typeof res.ut_hoverEnabled === 'boolean') state.hoverEnabled = res.ut_hoverEnabled;
           if (typeof res.ut_paused === 'boolean') state.paused = res.ut_paused;
           if (typeof res.ut_preserveLog === 'boolean') state.preserveLog = res.ut_preserveLog;
+          if (typeof res.ut_quickBarMinimized === 'boolean') state.quickBarMinimized = res.ut_quickBarMinimized;
+          if (typeof res.ut_historyOpen === 'boolean') state.historyOpen = res.ut_historyOpen;
           syncDomainStateToPageHook();
           if (!state.hoverEnabled) hideHoverTooltip(true);
           renderQuickBar();
@@ -126,6 +114,12 @@
           }
           renderQuickBar();
         });
+        // 퀵 바 최근 호버 목록은 페이지 메모리라 새로고침 시 사라지므로 background의 탭별 이력으로 복원
+        chrome.runtime.sendMessage({ type: 'URL_TRACKER_GET_HOVER_HISTORY' }, (histRes) => {
+          if (chrome.runtime.lastError || !Array.isArray(histRes?.hoverHistory)) return;
+          applyHoverHistory(histRes.hoverHistory);
+          renderQuickBar();
+        });
       }
     } catch {}
   }
@@ -138,6 +132,8 @@
       if ('hoverEnabled' in patch) toStore.ut_hoverEnabled = state.hoverEnabled;
       if ('paused' in patch) toStore.ut_paused = state.paused;
       if ('preserveLog' in patch) toStore.ut_preserveLog = state.preserveLog;
+      if ('quickBarMinimized' in patch) toStore.ut_quickBarMinimized = state.quickBarMinimized;
+      if ('historyOpen' in patch) toStore.ut_historyOpen = state.historyOpen;
       chrome.storage.local.set(toStore);
       chrome.runtime.sendMessage({
         type: 'URL_TRACKER_BROADCAST_SETTINGS',
@@ -581,6 +577,7 @@
   let quickBarHost = null;
   let quickBarRoot = null;
   let quickBarEl = null;
+  let quickBarRestoreWrapEl = null;
   let historyPopoverEl = null;
   let quickBarCopyTimer = null;
 
@@ -624,6 +621,65 @@
         font-size: 12px;
         line-height: 1.3;
         user-select: none;
+      }
+      .qb-wrap.minimized {
+        display: none;
+      }
+      .qb-min-btn {
+        cursor: pointer;
+        border: 1px solid rgba(148, 163, 184, 0.3);
+        background: rgba(30, 41, 59, 0.85);
+        color: #94a3b8;
+        width: 28px;
+        height: 28px;
+        padding: 0;
+        border-radius: 7px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        flex-shrink: 0;
+        transition: all 0.15s ease;
+      }
+      .qb-min-btn svg,
+      .qb-restore-btn svg {
+        display: block;
+      }
+      .qb-min-btn:hover {
+        background: rgba(51, 65, 85, 0.95);
+        border-color: rgba(56, 189, 248, 0.55);
+        color: #f8fafc;
+        transform: translateX(1px);
+      }
+      .qb-restore-wrap {
+        pointer-events: auto;
+        display: none;
+        align-items: center;
+        user-select: none;
+      }
+      .qb-restore-wrap.show {
+        display: flex;
+      }
+      .qb-restore-btn {
+        cursor: pointer;
+        border: 1px solid rgba(56, 189, 248, 0.5);
+        background: rgba(15, 23, 42, 0.95);
+        backdrop-filter: blur(12px);
+        color: #38bdf8;
+        width: 38px;
+        height: 38px;
+        padding: 0;
+        border-radius: 11px;
+        box-shadow: 0 8px 24px rgba(2, 6, 23, 0.55), 0 0 0 1px rgba(56, 189, 248, 0.16);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.15s ease;
+      }
+      .qb-restore-btn:hover {
+        background: rgba(30, 41, 59, 0.98);
+        border-color: rgba(56, 189, 248, 0.85);
+        color: #7dd3fc;
+        transform: translateX(-1px) scale(1.04);
       }
       .qb-brand {
         display: inline-flex;
@@ -761,7 +817,9 @@
       /* 최근 호버 5개 팝오버 스타일 */
       .qb-history-popover {
         pointer-events: auto;
-        width: min(720px, calc(100vw - 32px));
+        width: min(1150px, calc(100vw - 32px));
+        min-width: min(760px, calc(100vw - 32px));
+        max-width: calc(100vw - 32px);
         margin-bottom: 8px;
         border-radius: 12px;
         background: rgba(15, 23, 42, 0.97);
@@ -850,12 +908,14 @@
         border-radius: 4px;
         flex-shrink: 0;
       }
+      /* 요소명·호출 종류는 고정 폭 안에서 말줄임 처리해 URL과 겹치지 않게 함 (전체 내용은 title 툴팁) */
       .qb-hist-meta {
         display: flex;
         align-items: center;
         gap: 5px;
-        flex-shrink: 0;
-        max-width: 210px;
+        flex: 0 0 260px;
+        min-width: 0;
+        overflow: hidden;
       }
       .qb-hist-el {
         font-size: 11px;
@@ -864,7 +924,9 @@
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+        flex: 0 1 auto;
         max-width: 120px;
+        min-width: 0;
       }
       .qb-hist-kind {
         font-size: 10px;
@@ -873,9 +935,15 @@
         background: rgba(14, 165, 233, 0.18);
         color: #7dd3fc;
         white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        flex: 0 1 auto;
+        min-width: 0;
       }
+      /* URL 바로 뒤에 재방문 횟수를 붙이고, 복사 버튼만 우측 끝으로 보냄 */
       .qb-hist-url {
-        flex: 1;
+        flex: 0 1 auto;
+        min-width: 0;
         font-family: 'JetBrains Mono', Consolas, monospace;
         font-size: 11.5px;
         font-weight: 600;
@@ -884,7 +952,20 @@
         overflow: hidden;
         text-overflow: ellipsis;
       }
+      .qb-hist-repeat {
+        font-size: 10.5px;
+        font-weight: 800;
+        color: #052e16;
+        background: #34d399;
+        padding: 1px 7px;
+        border-radius: 999px;
+        flex-shrink: 0;
+      }
+      .qb-hist-item.repeated {
+        border-left: 3px solid #34d399;
+      }
       .qb-hist-copy {
+        margin-left: auto;
         font-size: 10.5px;
         font-weight: 600;
         color: #bae6fd;
@@ -916,13 +997,18 @@
       .querySelector('[data-role="history-close"]')
       .addEventListener('click', (e) => {
         e.stopPropagation();
-        state.historyOpen = false;
-        renderQuickBar();
+        saveSettings({ historyOpen: false });
       });
 
     quickBarEl = document.createElement('div');
     quickBarEl.className = 'qb-wrap';
     quickBarEl.innerHTML = `
+      <button type="button" class="qb-min-btn" data-role="minimize-btn" title="하단 트래커 화면 접기 (우측 하단으로 축소)" aria-label="축소">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="13 17 18 12 13 7"></polyline>
+          <polyline points="6 17 11 12 6 7"></polyline>
+        </svg>
+      </button>
       <div class="qb-brand" title="현재 도메인에서 URL 트래커가 활성화되어 있습니다">
         <span class="qb-dot" data-role="dot"></span>
         <span>URL 트래커</span>
@@ -939,6 +1025,29 @@
       </div>
     `;
 
+    quickBarRestoreWrapEl = document.createElement('div');
+    quickBarRestoreWrapEl.className = 'qb-restore-wrap';
+    quickBarRestoreWrapEl.innerHTML = `
+      <button type="button" class="qb-restore-btn" data-role="restore-btn" title="하단 트래커 화면 펼치기 (원래 상태로 복구)" aria-label="복구">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="11 17 6 12 11 7"></polyline>
+          <polyline points="18 17 13 12 18 7"></polyline>
+        </svg>
+      </button>
+    `;
+
+    const minimizeBtn = quickBarEl.querySelector('[data-role="minimize-btn"]');
+    minimizeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      saveSettings({ historyOpen: false, quickBarMinimized: true });
+    });
+
+    const restoreBtn = quickBarRestoreWrapEl.querySelector('[data-role="restore-btn"]');
+    restoreBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      saveSettings({ quickBarMinimized: false });
+    });
+
     const previewEl = quickBarEl.querySelector('[data-role="preview"]');
     previewEl.addEventListener('click', async (e) => {
       e.stopPropagation();
@@ -950,8 +1059,7 @@
     const historyBtn = quickBarEl.querySelector('[data-role="history-btn"]');
     historyBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      state.historyOpen = !state.historyOpen;
-      renderQuickBar();
+      saveSettings({ historyOpen: !state.historyOpen });
     });
 
     const hoverBtn = quickBarEl.querySelector('[data-role="hover-btn"]');
@@ -983,6 +1091,7 @@
 
     containerEl.appendChild(historyPopoverEl);
     containerEl.appendChild(quickBarEl);
+    containerEl.appendChild(quickBarRestoreWrapEl);
 
     quickBarRoot.appendChild(style);
     quickBarRoot.appendChild(containerEl);
@@ -1028,15 +1137,16 @@
     listEl.innerHTML = state.recentHovers
       .map(
         (item, idx) => `
-        <div class="qb-hist-item" data-hist-idx="${idx}" title="클릭하면 이 URL을 복사합니다: ${escapeHtml(
+        <div class="qb-hist-item${item.repeat > 0 ? ' repeated' : ''}" data-hist-idx="${idx}" title="클릭하면 이 URL을 복사합니다: ${escapeHtml(
           item.url
         )}">
           <span class="qb-hist-idx">#${idx + 1}</span>
-          <div class="qb-hist-meta">
+          <div class="qb-hist-meta" title="${escapeHtml(`${item.elementText || '요소'} · ${item.kind || '호버'}`)}">
             <span class="qb-hist-el">🎯 ${escapeHtml(item.elementText || '요소')}</span>
             <span class="qb-hist-kind">${escapeHtml(item.kind || '호버')}</span>
           </div>
           <span class="qb-hist-url">${escapeHtml(item.url)}</span>
+          ${item.repeat > 0 ? `<span class="qb-hist-repeat" title="포커스 아웃 후 다시 올린 횟수">(${item.repeat})</span>` : ''}
           <span class="qb-hist-copy" data-role="hist-copy-label">📋 복사</span>
         </div>
       `
@@ -1067,14 +1177,11 @@
     });
   }
 
-  function updateQuickBarPreview(url, kindLabel, hoverMeta = null) {
+  function updateQuickBarPreview(url, kindLabel, isHover = false) {
     if (!url || typeof url !== 'string') return;
-    if (hoverMeta?.isHover) {
-      if (state.shiftLocked) {
-        renderQuickBar();
-        return;
-      }
-      pushRecentHover(url, hoverMeta.kind || kindLabel, hoverMeta.elementText);
+    if (isHover && state.shiftLocked) {
+      renderQuickBar();
+      return;
     }
     state.latestPreviewUrl = url;
     state.latestPreviewKind = kindLabel || 'URL';
@@ -1093,6 +1200,17 @@
     const bar = ensureQuickBar();
     if (!bar) return;
     quickBarHost.style.display = 'block';
+
+    const isMinimized = Boolean(state.quickBarMinimized);
+    bar.classList.toggle('minimized', isMinimized);
+    if (quickBarRestoreWrapEl) {
+      quickBarRestoreWrapEl.classList.toggle('show', isMinimized);
+    }
+    if (isMinimized) {
+      if (state.historyOpen) state.historyOpen = false;
+      if (historyPopoverEl) historyPopoverEl.classList.remove('open');
+      return;
+    }
 
     const dot = bar.querySelector('[data-role="dot"]');
     const previewEl = bar.querySelector('[data-role="preview"]');
@@ -1164,22 +1282,6 @@
     renderHistoryPopoverList();
   }
 
-  // 외부 영역 클릭 시 최근 호버 팝오버 닫기
-  if (IS_TOP) {
-    window.addEventListener(
-      'mousedown',
-      (e) => {
-        if (!state.historyOpen || !quickBarHost) return;
-        const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
-        if (!path.includes(quickBarHost)) {
-          state.historyOpen = false;
-          renderQuickBar();
-        }
-      },
-      true
-    );
-  }
-
   // 마우스 이동 시 Shift 키 상태 동기화 (포커스가 다른 프레임에 있을 때도 Shift 홀드 즉시 반영)
   window.addEventListener(
     'mousemove',
@@ -1211,7 +1313,15 @@
     }
   });
 
-  // 단축키: 허용된 도메인에서만 동작
+  // 단축키: 허용된 도메인에서만 동작 (입력창 포커스 중에는 기존 서비스의 키 입력을 방해하지 않도록 예외 처리)
+  function isEditableTarget(target) {
+    if (!target || !(target instanceof Element)) return false;
+    const tag = target.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+    if (target.isContentEditable) return true;
+    return false;
+  }
+
   window.addEventListener(
     'keydown',
     async (e) => {
@@ -1222,16 +1332,22 @@
       }
 
       if (e.key === 'Escape' && state.historyOpen && IS_TOP) {
-        state.historyOpen = false;
-        renderQuickBar();
+        saveSettings({ historyOpen: false });
         return;
       }
 
-      if (e.altKey && (e.key === 'c' || e.key === 'C' || e.code === 'KeyC')) {
-        e.preventDefault();
-        e.stopPropagation();
+      // 에디터나 입력 필드에 포커스가 있을 때는 단축키가 기존 서비스 동작을 가로채지 않도록 패스
+      if (isEditableTarget(e.target)) return;
 
+      if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'c' || e.key === 'C' || e.code === 'KeyC')) {
         const firstCandidate = state.currentHoverInfo?.candidates?.[0];
+        const hasCopyTarget = Boolean(
+          firstCandidate?.displayUrl || (IS_TOP && state.latestPreviewUrl) || !IS_TOP
+        );
+        if (!hasCopyTarget) return;
+
+        e.preventDefault();
+
         if (firstCandidate?.displayUrl) {
           const urlToCopy = firstCandidate.displayUrl;
           await copyToClipboard(urlToCopy);
@@ -1254,11 +1370,11 @@
             .sendMessage({ type: 'URL_TRACKER_TRIGGER_TOP_COPY' })
             .catch(() => {});
         }
-      } else if (e.altKey && (e.key === 'h' || e.key === 'H' || e.code === 'KeyH')) {
+      } else if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'h' || e.key === 'H' || e.code === 'KeyH')) {
         e.preventDefault();
         saveSettings({ hoverEnabled: !state.hoverEnabled });
         if (!state.hoverEnabled) hideHoverTooltip(true);
-      } else if (e.altKey && (e.key === 'q' || e.key === 'Q' || e.code === 'KeyQ')) {
+      } else if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'q' || e.key === 'Q' || e.code === 'KeyQ')) {
         e.preventDefault();
         try {
           if (state.sidePanelOpen) {
@@ -1272,68 +1388,70 @@
     true
   );
 
-  // page-hook.js 메시지 수신 및 사이드 패널(background.js) 전달
-  window.addEventListener('message', (event) => {
-    if (!state.domainAllowed) return;
-    const data = event.data;
-    if (!data || data.source !== 'URL_TRACKER_PAGE_HOOK') return;
-
-    if (data.type === 'HOVER_RESULT') {
-      if (state.shiftLocked) return;
-      showHoverTooltip(data.payload);
-      const firstCandidate = data.payload?.candidates?.[0];
-      const firstUrl = firstCandidate?.displayUrl;
-      if (firstUrl) {
-        updateQuickBarPreview(firstUrl, '호버', {
-          isHover: true,
-          kind: firstCandidate?.kind || '호버 URL',
-          elementText:
-            data.payload?.element?.text ||
-            data.payload?.element?.selector ||
-            '요소'
-        });
+  // page-hook.js 이벤트 수신 및 사이드 패널(background.js) 전달 (전용 CustomEvent 사용으로 호스트 페이지의 window.onmessage 리스너와 완전 분리)
+  window.addEventListener(
+    '__url_tracker_from_page__',
+    (event) => {
+      if (!state.domainAllowed) return;
+      let data = null;
+      try {
+        data = typeof event.detail === 'string' ? JSON.parse(event.detail) : event.detail;
+      } catch {
+        return;
       }
-      try {
-        chrome.runtime.sendMessage({
-          type: 'URL_TRACKER_HOVER',
-          payload: data.payload
-        }).catch(() => {});
-      } catch {}
-      return;
-    }
+      if (!data || !data.type) return;
 
-    if (data.type === 'HOVER_CLEAR') {
-      if (state.shiftLocked) return;
-      hideHoverTooltip(false);
-      return;
-    }
-
-    if (data.type === 'TRACKER_EVENT') {
-      if (state.paused) return;
-      if (data.payload?.displayUrl) {
-        updateQuickBarPreview(
-          data.payload.displayUrl,
-          data.payload.badge || data.payload.method || '호출'
-        );
+      if (data.type === 'HOVER_RESULT') {
+        if (state.shiftLocked) return;
+        showHoverTooltip(data.payload);
+        const firstCandidate = data.payload?.candidates?.[0];
+        const firstUrl = firstCandidate?.displayUrl;
+        if (firstUrl) {
+          updateQuickBarPreview(firstUrl, '호버', true);
+        }
+        try {
+          chrome.runtime.sendMessage({
+            type: 'URL_TRACKER_HOVER',
+            payload: data.payload
+          }).catch(() => {});
+        } catch {}
+        return;
       }
-      try {
-        chrome.runtime.sendMessage({
-          type: 'URL_TRACKER_EVENT',
-          payload: data.payload
-        }).catch(() => {});
-      } catch {}
-      return;
-    }
 
-    if (data.type === 'TRACKER_EVENT_UPDATE') {
-      try {
-        chrome.runtime.sendMessage({
-          type: 'URL_TRACKER_EVENT_UPDATE',
-          payload: data.payload
-        }).catch(() => {});
-      } catch {}
-    }
-  });
+      if (data.type === 'HOVER_CLEAR') {
+        if (state.shiftLocked) return;
+        hideHoverTooltip(false);
+        return;
+      }
+
+      if (data.type === 'TRACKER_EVENT') {
+        if (state.paused) return;
+        if (data.payload?.displayUrl) {
+          updateQuickBarPreview(
+            data.payload.displayUrl,
+            data.payload.badge || data.payload.method || '호출'
+          );
+        }
+        try {
+          chrome.runtime.sendMessage({
+            type: 'URL_TRACKER_EVENT',
+            payload: data.payload
+          }).catch(() => {});
+        } catch {}
+        return;
+      }
+
+      if (data.type === 'TRACKER_EVENT_UPDATE') {
+        try {
+          chrome.runtime.sendMessage({
+            type: 'URL_TRACKER_EVENT_UPDATE',
+            payload: data.payload
+          }).catch(() => {});
+        } catch {}
+      }
+    },
+    true
+  );
 
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg?.type === 'URL_TRACKER_TOGGLE_HOVER') {
@@ -1341,12 +1459,11 @@
       saveSettings({ hoverEnabled: !state.hoverEnabled });
       if (!state.hoverEnabled) hideHoverTooltip(true);
     } else if (msg?.type === 'URL_TRACKER_QUICKBAR_UPDATE') {
+      if (IS_TOP && Array.isArray(msg.hoverHistory)) {
+        applyHoverHistory(msg.hoverHistory);
+      }
       if (msg.url) {
-        updateQuickBarPreview(msg.url, msg.badge || '최근 URL', {
-          isHover: Boolean(msg.isHover),
-          kind: msg.kind,
-          elementText: msg.elementText
-        });
+        updateQuickBarPreview(msg.url, msg.badge || '최근 URL', Boolean(msg.isHover));
       }
     } else if (msg?.type === 'URL_TRACKER_QUICKBAR_COPIED') {
       if (IS_TOP && msg.url) {
@@ -1365,6 +1482,11 @@
         state.sidePanelOpen = msg.open;
         renderQuickBar();
       }
+    } else if (msg?.type === 'URL_TRACKER_HOVER_HISTORY_CLEARED') {
+      if (IS_TOP) {
+        state.recentHovers = [];
+        renderQuickBar();
+      }
     } else if (msg?.type === 'URL_TRACKER_SETTINGS_UPDATED' && msg.settings) {
       if (Array.isArray(msg.settings.allowedDomains)) {
         state.allowedDomains = msg.settings.allowedDomains;
@@ -1379,6 +1501,13 @@
       }
       if (typeof msg.settings.preserveLog === 'boolean') {
         state.preserveLog = msg.settings.preserveLog;
+      }
+      if (typeof msg.settings.historyOpen === 'boolean') {
+        state.historyOpen = msg.settings.historyOpen;
+      }
+      if (typeof msg.settings.quickBarMinimized === 'boolean') {
+        state.quickBarMinimized = msg.settings.quickBarMinimized;
+        if (state.quickBarMinimized) state.historyOpen = false;
       }
       renderQuickBar();
     }

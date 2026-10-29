@@ -46,7 +46,13 @@
   // ---------------------------------------------------------------------------
   const nativeListeners = new WeakMap(); // Element -> Array<{ type, listener }>
   const learnedElementUrls = new Map(); // selectorKey -> Array<{ url, method, kind, params, timestamp }>
+  const CLICK_LEARN_WINDOW_MS = 5000; // 클릭 후 이 시간 안에 발생한 호출을 클릭 요소의 실측 URL로 학습 (확인창·느린 응답 대비)
+  // 같은 종류 요소(같은 핸들러·같은 목록)끼리 공유하는 실측 URL 패턴
+  // 예: /popup/employee/NX/23456 을 클릭 실측 → /popup/employee/NX/{attr:data-empno} 로 저장 → 다른 행 호버 시 그 행 값으로 채움
+  const learnedUrlPatterns = new Map(); // patternGroupKey -> Array<{ template, kind, method }>
+  const MAX_PATTERNS_PER_GROUP = 3;
   let lastClickContext = null;
+  let lastHoveredEl = null;
   let scriptFunctionCache = null;
   let lastScriptCount = 0;
 
@@ -55,27 +61,23 @@
   const origElementAddEventListener =
     (typeof Element !== 'undefined' && Element.prototype.addEventListener) || origAddEventListener;
 
-  // content.js로부터 허용 도메인 여부 실시간 동기화 수신
+  // content.js로부터 허용 도메인 여부 실시간 동기화 수신 (CustomEvent 사용으로 기존 페이지의 window.onmessage 리스너 간섭 원천 차단)
   origAddEventListener.call(
     window,
-    'message',
+    '__url_tracker_set_domain__',
     (e) => {
-      if (
-        e?.data &&
-        e.data.source === 'URL_TRACKER_CONTENT' &&
-        e.data.type === 'SET_DOMAIN_ALLOWED'
-      ) {
-        isDomainAllowed = Boolean(e.data.allowed);
-      }
+      try {
+        const data = typeof e?.detail === 'string' ? JSON.parse(e.detail) : e?.detail;
+        if (data && typeof data.allowed === 'boolean') {
+          isDomainAllowed = data.allowed;
+        }
+      } catch {}
     },
     true
   );
 
   if (typeof Element !== 'undefined' && Element.prototype) {
     Element.prototype.addEventListener = function (type, listener, options) {
-      if (type === 'unload' || type === 'beforeunload') {
-        return;
-      }
       try {
         if (
           this instanceof Element &&
@@ -265,7 +267,9 @@
     }
     if (text.length > 45) text = text.slice(0, 45) + '…';
 
-    const uniqueKey = `${window.location.pathname}::${selector}::${text.slice(0, 30)}`;
+    // 학습 캐시 키에는 클래스를 넣지 않는다: 클릭 후 on/active 같은 상태 클래스가 바뀌면 같은 요소를 다른 요소로 인식하기 때문
+    const keySelector = tableRowInfo ? selector : `${tag}${id}`;
+    const uniqueKey = `${window.location.pathname}::${keySelector}::${text.slice(0, 30)}`;
     return {
       tag,
       id: el.id || '',
@@ -429,13 +433,23 @@
   }
 
   // ---------------------------------------------------------------------------
-  // 3. 이벤트 브로드캐스트 (page-hook.js -> content.js)
+  // 3. 이벤트 브로드캐스트 (page-hook.js -> content.js, CustomEvent + JSON 문자열 사용으로 MAIN ↔ ISOLATED 월드 간 안전한 전달 및 페이지 window.onmessage 무간섭)
   // ---------------------------------------------------------------------------
+  function dispatchToContent(type, payload) {
+    try {
+      window.dispatchEvent(
+        new CustomEvent('__url_tracker_from_page__', {
+          detail: JSON.stringify({ type, payload })
+        })
+      );
+    } catch {}
+  }
+
   function emitTrackerEvent(payload) {
     if (!isDomainAllowed) return null;
     try {
       const activeClick =
-        lastClickContext && Date.now() - lastClickContext.timestamp < 2000
+        lastClickContext && Date.now() - lastClickContext.timestamp < CLICK_LEARN_WINDOW_MS
           ? lastClickContext
           : null;
 
@@ -479,14 +493,31 @@
         learnedElementUrls.set(activeClick.uniqueKey, list.slice(0, 5));
       }
 
-      window.postMessage(
-        {
-          source: 'URL_TRACKER_PAGE_HOOK',
-          type: 'TRACKER_EVENT',
-          payload: entry
-        },
-        '*'
-      );
+      // 클릭 요소의 값(속성·행 데이터·onclick 인자 등)이 URL에 들어있으면 같은 종류 요소용 패턴으로 저장
+      // (부가 기능이므로 실패해도 아래 이벤트 전달은 계속되도록 별도 try)
+      try {
+        if (activeClick?.patternGroupKey && entry.displayUrl) {
+          const template = buildUrlTemplate(entry.displayUrl, activeClick.elementValues);
+          if (template) {
+            const patterns = (learnedUrlPatterns.get(activeClick.patternGroupKey) || []).filter(
+              (p) => p.template !== template
+            );
+            patterns.unshift({ template, kind: entry.kind, method: entry.method || 'GET' });
+            learnedUrlPatterns.set(activeClick.patternGroupKey, patterns.slice(0, MAX_PATTERNS_PER_GROUP));
+          }
+        }
+      } catch {}
+
+      dispatchToContent('TRACKER_EVENT', entry);
+
+      // 커서가 아직 클릭한 요소 위에 있으면 방금 학습한 URL로 호버 결과를 즉시 다시 보냄 (벗어났다 돌아오지 않아도 이력에 반영)
+      if (activeClick?.uniqueKey && entry.displayUrl && lastHoveredEl) {
+        const hoverDesc = getElementDescriptor(lastHoveredEl);
+        if (hoverDesc?.uniqueKey === activeClick.uniqueKey) {
+          const info = inspectElementOnHover(lastHoveredEl);
+          if (info) dispatchToContent('HOVER_RESULT', { ...info, isRefresh: true });
+        }
+      }
       return entry.id;
     } catch {
       return null;
@@ -495,16 +526,7 @@
 
   function emitTrackerUpdate(id, updates) {
     if (!isDomainAllowed || !id) return;
-    try {
-      window.postMessage(
-        {
-          source: 'URL_TRACKER_PAGE_HOOK',
-          type: 'TRACKER_EVENT_UPDATE',
-          payload: { id, ...updates }
-        },
-        '*'
-      );
-    } catch {}
+    dispatchToContent('TRACKER_EVENT_UPDATE', { id, ...updates });
   }
 
   // ---------------------------------------------------------------------------
@@ -514,11 +536,12 @@
     window,
     'mousedown',
     (e) => {
+      if (!isDomainAllowed) return;
       const el = findActionableElement(e.target);
       if (el) {
         const desc = getElementDescriptor(el);
         if (desc) {
-          lastClickContext = { ...desc, timestamp: Date.now() };
+          lastClickContext = buildClickContext(el, desc);
         }
       }
     },
@@ -529,11 +552,12 @@
     window,
     'click',
     (e) => {
+      if (!isDomainAllowed) return;
       const el = findActionableElement(e.target);
       if (!el) return;
       const desc = getElementDescriptor(el);
       if (desc) {
-        lastClickContext = { ...desc, timestamp: Date.now() };
+        lastClickContext = buildClickContext(el, desc);
       }
 
       // 일반 <a href="..."> 링크 클릭 감지
@@ -582,12 +606,27 @@
     const origSend = OrigXHR.prototype.send;
 
     OrigXHR.prototype.open = function (method, url, ...rest) {
-      this.__ut_method = (method || 'GET').toUpperCase();
-      this.__ut_url = typeof url === 'string' ? url : String(url || '');
+      if (isDomainAllowed) {
+        try {
+          Object.defineProperty(this, '__ut_method', {
+            value: (method || 'GET').toUpperCase(),
+            configurable: true,
+            writable: true
+          });
+          Object.defineProperty(this, '__ut_url', {
+            value: typeof url === 'string' ? url : String(url || ''),
+            configurable: true,
+            writable: true
+          });
+        } catch {}
+      }
       return origOpen.call(this, method, url, ...rest);
     };
 
     OrigXHR.prototype.send = function (body) {
+      if (!isDomainAllowed) {
+        return origSend.call(this, body);
+      }
       try {
         const rawUrl = this.__ut_url || '';
         if (rawUrl && !rawUrl.startsWith('chrome-extension://')) {
@@ -607,23 +646,16 @@
             status: '진행중…'
           });
 
-          origAddEventListener.call(this, 'loadend', () => {
-            const duration = Math.round(performance.now() - startTime);
-            let preview = '';
-            try {
-              if (!this.responseType || this.responseType === 'text') {
-                preview = (this.responseText || '').slice(0, 600);
-              } else if (this.responseType === 'json' && this.response) {
-                preview = JSON.stringify(this.response).slice(0, 600);
-              }
-            } catch {}
-            emitTrackerUpdate(entryId, {
-              status: `${this.status || 0} (${duration}ms)`,
-              statusCode: this.status || 0,
-              duration,
-              responsePreview: preview
+          if (entryId) {
+            origAddEventListener.call(this, 'loadend', () => {
+              const duration = Math.round(performance.now() - startTime);
+              emitTrackerUpdate(entryId, {
+                status: `${this.status || 0} (${duration}ms)`,
+                statusCode: this.status || 0,
+                duration
+              });
             });
-          });
+          }
         }
       } catch {}
       return origSend.call(this, body);
@@ -634,6 +666,9 @@
   if (typeof window.fetch === 'function') {
     const origFetch = window.fetch;
     window.fetch = function (input, init) {
+      if (!isDomainAllowed) {
+        return origFetch.apply(this, arguments);
+      }
       let entryId = null;
       const startTime = performance.now();
       try {
@@ -706,21 +741,23 @@
   if (typeof window.open === 'function') {
     const origWindowOpen = window.open;
     window.open = function (url, target, features) {
-      try {
-        const rawUrl = typeof url === 'string' ? url.trim() : String(url || '').trim();
-        if (rawUrl && rawUrl !== 'about:blank' && !rawUrl.startsWith('javascript:')) {
-          emitTrackerEvent({
-            kind: 'POPUP',
-            badge: `팝업 오픈 (${target || '_blank'})`,
-            method: 'GET',
-            displayUrl: toDisplayPath(rawUrl),
-            fullUrl: toFullUrl(rawUrl),
-            queryParams: parseQueryParams(rawUrl),
-            bodyParams: features ? { _windowFeatures: features } : {},
-            targetWindow: target || '_blank'
-          });
-        }
-      } catch {}
+      if (isDomainAllowed) {
+        try {
+          const rawUrl = typeof url === 'string' ? url.trim() : String(url || '').trim();
+          if (rawUrl && rawUrl !== 'about:blank' && !rawUrl.startsWith('javascript:')) {
+            emitTrackerEvent({
+              kind: 'POPUP',
+              badge: `팝업 오픈 (${target || '_blank'})`,
+              method: 'GET',
+              displayUrl: toDisplayPath(rawUrl),
+              fullUrl: toFullUrl(rawUrl),
+              queryParams: parseQueryParams(rawUrl),
+              bodyParams: features ? { _windowFeatures: features } : {},
+              targetWindow: target || '_blank'
+            });
+          }
+        } catch {}
+      }
       return origWindowOpen.apply(this, arguments);
     };
   }
@@ -728,6 +765,7 @@
   // 새로 열린 팝업창(window.opener가 존재하는 최상위 창)인 경우 초기 오픈 URL도 보완 전송
   if (IS_TOP && window.opener && window.location.href && !window.location.href.startsWith('about:')) {
     setTimeout(() => {
+      if (!isDomainAllowed) return;
       emitTrackerEvent({
         kind: 'POPUP',
         badge: `팝업창 로드 (${window.name || 'popup'})`,
@@ -745,34 +783,40 @@
   if (typeof HTMLFormElement !== 'undefined') {
     const origFormSubmit = HTMLFormElement.prototype.submit;
     HTMLFormElement.prototype.submit = function () {
-      try {
-        const rawAction = this.getAttribute('action') || window.location.pathname;
-        const method = (this.getAttribute('method') || 'GET').toUpperCase();
-        const target = this.getAttribute('target') || '_self';
-        const isNamedTarget =
-          Boolean(target) && !['_self', '_blank', '_top', '_parent'].includes(target);
-        const isIframeTarget =
-          (isNamedTarget && isExistingIframeTarget(target)) ||
-          (!IS_TOP && (target === '_self' || !target));
-        const isPopupTarget =
-          target === '_blank' || (isNamedTarget && !isExistingIframeTarget(target));
-        const formParams = extractFormParams(this);
-        this.__ut_submitted = Date.now();
-        emitTrackerEvent({
-          kind: isPopupTarget ? 'POPUP' : isIframeTarget ? 'IFRAME_NAV' : 'FORM_SUBMIT',
-          badge: isPopupTarget
-            ? `팝업 폼 전송 (${method} → ${target})`
-            : isIframeTarget
-            ? `IFRAME 폼 (${method} → ${target !== '_self' ? target : FRAME_NAME})`
-            : `폼 전송 (${method}${target !== '_self' ? ' → ' + target : ''})`,
-          method,
-          displayUrl: toDisplayPath(rawAction),
-          fullUrl: toFullUrl(rawAction),
-          queryParams: parseQueryParams(rawAction),
-          bodyParams: formParams,
-          targetWindow: target
-        });
-      } catch {}
+      if (isDomainAllowed) {
+        try {
+          const rawAction = this.getAttribute('action') || window.location.pathname;
+          const method = (this.getAttribute('method') || 'GET').toUpperCase();
+          const target = this.getAttribute('target') || '_self';
+          const isNamedTarget =
+            Boolean(target) && !['_self', '_blank', '_top', '_parent'].includes(target);
+          const isIframeTarget =
+            (isNamedTarget && isExistingIframeTarget(target)) ||
+            (!IS_TOP && (target === '_self' || !target));
+          const isPopupTarget =
+            target === '_blank' || (isNamedTarget && !isExistingIframeTarget(target));
+          const formParams = extractFormParams(this);
+          Object.defineProperty(this, '__ut_submitted', {
+            value: Date.now(),
+            configurable: true,
+            writable: true
+          });
+          emitTrackerEvent({
+            kind: isPopupTarget ? 'POPUP' : isIframeTarget ? 'IFRAME_NAV' : 'FORM_SUBMIT',
+            badge: isPopupTarget
+              ? `팝업 폼 전송 (${method} → ${target})`
+              : isIframeTarget
+              ? `IFRAME 폼 (${method} → ${target !== '_self' ? target : FRAME_NAME})`
+              : `폼 전송 (${method}${target !== '_self' ? ' → ' + target : ''})`,
+            method,
+            displayUrl: toDisplayPath(rawAction),
+            fullUrl: toFullUrl(rawAction),
+            queryParams: parseQueryParams(rawAction),
+            bodyParams: formParams,
+            targetWindow: target
+          });
+        } catch {}
+      }
       return origFormSubmit.apply(this, arguments);
     };
 
@@ -780,6 +824,7 @@
       window,
       'submit',
       (e) => {
+        if (!isDomainAllowed) return;
         const form = e.target;
         if (!(form instanceof HTMLFormElement)) return;
         if (form.__ut_submitted && Date.now() - form.__ut_submitted < 500) return;
@@ -821,9 +866,11 @@
       Object.defineProperty(HTMLIFrameElement.prototype, 'src', {
         ...srcDesc,
         set(val) {
-          try {
-            recordIframeNavigation(this, val);
-          } catch {}
+          if (isDomainAllowed) {
+            try {
+              recordIframeNavigation(this, val);
+            } catch {}
+          }
           return srcDesc.set.call(this, val);
         }
       });
@@ -831,24 +878,37 @@
 
     const origSetAttribute = Element.prototype.setAttribute;
     Element.prototype.setAttribute = function (name, value) {
-      try {
-        if (this.tagName === 'IFRAME' && String(name).toLowerCase() === 'src') {
-          recordIframeNavigation(this, value);
-        }
-      } catch {}
+      if (isDomainAllowed) {
+        try {
+          if (this.tagName === 'IFRAME' && String(name).toLowerCase() === 'src') {
+            recordIframeNavigation(this, value);
+          }
+        } catch {}
+      }
       return origSetAttribute.call(this, name, value);
     };
   }
 
   function recordIframeNavigation(iframeEl, rawUrl) {
+    if (!isDomainAllowed) return;
     if (!rawUrl || typeof rawUrl !== 'string') return;
     const trimmed = rawUrl.trim();
     if (!trimmed || trimmed === 'about:blank' || trimmed.startsWith('javascript:')) return;
     if (iframeEl.__ut_last_src === trimmed && Date.now() - (iframeEl.__ut_last_ts || 0) < 300) {
       return;
     }
-    iframeEl.__ut_last_src = trimmed;
-    iframeEl.__ut_last_ts = Date.now();
+    try {
+      Object.defineProperty(iframeEl, '__ut_last_src', {
+        value: trimmed,
+        configurable: true,
+        writable: true
+      });
+      Object.defineProperty(iframeEl, '__ut_last_ts', {
+        value: Date.now(),
+        configurable: true,
+        writable: true
+      });
+    } catch {}
 
     const iframeLabel = iframeEl.id
       ? `#${iframeEl.id}`
@@ -870,6 +930,7 @@
   // 4-6. Chrome Navigation API (location.href = ..., window.location = ..., history.pushState 등 모두 감지)
   if (window.navigation && typeof window.navigation.addEventListener === 'function') {
     window.navigation.addEventListener('navigate', (event) => {
+      if (!isDomainAllowed) return;
       try {
         const destUrl = event.destination?.url || '';
         if (!destUrl || destUrl.startsWith('javascript:') || destUrl === window.location.href) {
@@ -1412,6 +1473,181 @@
     return handlers;
   }
 
+  // ---------------------------------------------------------------------------
+  // 경로 파라미터 URL 패턴 학습 (예: /popup/employee/NX/{사번})
+  // ---------------------------------------------------------------------------
+  const STATE_CLASS_RE = /^(on|active|selected|hover|focus|current|open|over|checked|disabled|odd|even)$/i;
+
+  function buildClickContext(el, desc) {
+    const context = { ...desc, timestamp: Date.now() };
+    try {
+      context.patternGroupKey = getPatternGroupKey(el);
+      context.elementValues = collectElementValues(el);
+    } catch {}
+    return context;
+  }
+
+  function getInlineCallCode(el) {
+    const anchor = el.tagName === 'A' ? el : el.closest('a');
+    const onclickCode = el.getAttribute('onclick') || anchor?.getAttribute('onclick') || '';
+    if (onclickCode) return onclickCode;
+    const href = anchor?.getAttribute('href') || '';
+    return /^javascript:/i.test(href) ? href.replace(/^javascript:/i, '') : '';
+  }
+
+  // 같은 종류 요소 판별 키: 같은 화면 + 태그 + 상태 클래스를 뺀 클래스 + 같은 클릭 동작(함수명/핸들러) + 같은 표의 같은 열
+  function getPatternGroupKey(el) {
+    const classes =
+      typeof el.className === 'string'
+        ? el.className
+            .trim()
+            .split(/\s+/)
+            .filter((c) => c && !STATE_CLASS_RE.test(c) && !c.startsWith('url-tracker-'))
+            .sort()
+            .join('.')
+        : '';
+    const parts = [window.location.pathname, el.tagName.toLowerCase(), classes];
+
+    let hasClickBehavior = false;
+    const fnMatch = getInlineCallCode(el).match(/([\w$.]+)\s*\(/);
+    if (fnMatch) {
+      parts.push(`fn:${fnMatch[1]}`);
+      hasClickBehavior = true;
+    }
+    for (const h of getBoundClickHandlers(el)) {
+      parts.push(`${h.type}:${h.code.length}:${h.code.slice(0, 60)}`);
+      hasClickBehavior = true;
+    }
+
+    const table = el.closest('table');
+    if (table) {
+      const td = el.closest('td');
+      parts.push(`table:${table.id || table.className}:${td ? td.cellIndex : 'row'}`);
+    }
+
+    // 클릭 동작도 없고 목록(표) 안도 아니면 같은 종류로 묶을 근거가 없으므로 패턴 학습 대상에서 제외
+    if (!hasClickBehavior && !table) return null;
+    return parts.join('|');
+  }
+
+  // URL 자리에 들어갈 수 있는 요소 값 수집 (이름은 같은 종류 요소끼리 동일하게 유지되도록 출처 기반으로 부여)
+  function collectElementValues(el) {
+    const values = new Map();
+    const add = (name, raw) => {
+      if (raw == null || typeof raw === 'object') return;
+      const s = String(raw).replace(/\s+/g, ' ').trim();
+      if (s.length < 2 || s.length > 80) return;
+      if (!values.has(name)) values.set(name, s);
+    };
+    const addAttrs = (node, prefix) => {
+      if (!node?.attributes) return;
+      for (const attr of node.attributes) {
+        if (attr.name === 'class' || attr.name === 'style') continue;
+        add(`${prefix}:${attr.name}`, attr.value);
+      }
+    };
+
+    addAttrs(el, 'attr');
+    if (el.tagName !== 'A') addAttrs(el.closest('a'), 'a-attr');
+
+    const callMatch = getInlineCallCode(el).match(/[\w$.]+\s*\(([^)]*)\)/);
+    if (callMatch) {
+      parseCallArguments(callMatch[1]).forEach((v, i) => add(`arg:${i}`, v));
+    }
+
+    add('text', el.innerText || el.value || '');
+
+    const tr = el.tagName === 'TR' ? el : el.closest('tr');
+    if (tr) {
+      addAttrs(tr, 'tr-attr');
+      Array.from(tr.cells || []).forEach((td, i) => add(`td:${i}`, td.innerText || ''));
+
+      try {
+        const dtCtx = getDataTableRowContext(tr);
+        const rowData = dtCtx ? getDataTableApi(dtCtx.table)?.row(tr).data() : null;
+        if (rowData && typeof rowData === 'object' && !Array.isArray(rowData)) {
+          Object.entries(rowData).forEach(([k, v]) => add(`row:${k}`, v));
+        }
+      } catch {}
+
+      try {
+        if (tr.classList.contains('jqgrow') && window.jQuery) {
+          const $grid = window.jQuery(tr.closest('table.ui-jqgrid-btable'));
+          const rowData = $grid.jqGrid ? $grid.jqGrid('getRowData', tr.id) : null;
+          if (rowData && typeof rowData === 'object') {
+            Object.entries(rowData).forEach(([k, v]) => add(`row:${k}`, v));
+          }
+        }
+      } catch {}
+    }
+    return values;
+  }
+
+  // 실측 URL의 경로 구간·쿼리 값 중 요소 값과 일치하는 부분을 {{값 이름}} 자리표시로 치환 (일치가 없으면 null)
+  function buildUrlTemplate(url, values) {
+    if (!url || !(values instanceof Map) || values.size === 0) return null;
+    const m = url.match(/^([a-z][\w+.-]*:\/\/[^/?#]*)?([^?#]*)(\?[^#]*)?(#.*)?$/i);
+    if (!m) return null;
+    const [, origin = '', path = '', query = '', hash = ''] = m;
+
+    const findValueName = (raw) => {
+      let decoded = raw;
+      try {
+        decoded = decodeURIComponent(raw);
+      } catch {}
+      // 사번·문서번호처럼 숫자가 섞인 3자 이상 값만 자리표시로 본다
+      // (NX 같은 고정 코드 구간이나 pageSize=10 같은 짧은 값이 우연히 행 값과 같아 잘못 치환되는 것을 방지)
+      if (decoded.length < 3 || !/\d/.test(decoded)) return null;
+      for (const [name, val] of values) {
+        if (val === decoded) return name;
+      }
+      return null;
+    };
+
+    let replaced = 0;
+    const newPath = path
+      .split('/')
+      .map((seg) => {
+        const name = seg ? findValueName(seg) : null;
+        if (!name) return seg;
+        replaced++;
+        return `{{${name}}}`;
+      })
+      .join('/');
+
+    const newQuery = query
+      ? '?' +
+        query
+          .slice(1)
+          .split('&')
+          .map((pair) => {
+            const eqIdx = pair.indexOf('=');
+            if (eqIdx < 0) return pair;
+            const name = findValueName(pair.slice(eqIdx + 1));
+            if (!name) return pair;
+            replaced++;
+            return `${pair.slice(0, eqIdx + 1)}{{${name}}}`;
+          })
+          .join('&')
+      : '';
+
+    return replaced > 0 ? origin + newPath + newQuery + hash : null;
+  }
+
+  // 자리표시를 대상 요소의 같은 이름 값으로 채움 (하나라도 없으면 추정 불가로 null)
+  function fillUrlTemplate(template, values) {
+    let missing = false;
+    const url = template.replace(/\{\{([^}]+)\}\}/g, (_, name) => {
+      const v = values.get(name);
+      if (v == null) {
+        missing = true;
+        return '';
+      }
+      return encodeURIComponent(v);
+    });
+    return missing ? null : url;
+  }
+
   // 요소 마우스 오버 시 종합 URL 분석 수행
   function inspectElementOnHover(rawTarget) {
     const el = findActionableElement(rawTarget);
@@ -1456,6 +1692,7 @@
         });
       });
     }
+
 
     // [2] <a href="..."> 또는 data-url / formaction 직접 속성
     const anchor = el.tagName === 'A' ? el : el.closest('a');
@@ -1759,6 +1996,27 @@
       }
     } catch {}
 
+    // [8] 같은 종류 요소를 클릭해 학습한 URL 패턴을 이 요소의 값으로 채워 추정 (경로에 파라미터를 넣는 URL 대응)
+    //     실측·정적 분석 후보가 먼저 자리 잡도록 마지막에 추가한다 (같은 URL이면 기존 후보의 표기를 유지)
+    try {
+      const patternGroupKey = getPatternGroupKey(el);
+      const patterns = patternGroupKey ? learnedUrlPatterns.get(patternGroupKey) : null;
+      if (Array.isArray(patterns) && patterns.length > 0) {
+        const values = collectElementValues(el);
+        patterns.forEach((p) => {
+          const url = fillUrlTemplate(p.template, values);
+          if (!url) return;
+          addCandidate({
+            url,
+            kind: `${p.kind} (패턴 추정)`,
+            method: p.method,
+            params: parseQueryParams(url),
+            source: '같은 종류 요소 클릭 실측 패턴'
+          });
+        });
+      }
+    } catch {}
+
     if (candidates.length === 0 && !onclickCode && handlerSummaries.length === 0) {
       return null;
     }
@@ -1782,7 +2040,6 @@
   }
 
   // content.js로부터 마우스 오버 분석 요청 수신
-  let lastHoveredEl = null;
   origAddEventListener.call(
     window,
     'mouseover',
@@ -1795,27 +2052,14 @@
         if (el === lastHoveredEl) return;
         lastHoveredEl = el;
         if (!el) {
-          window.postMessage(
-            { source: 'URL_TRACKER_PAGE_HOOK', type: 'HOVER_CLEAR' },
-            '*'
-          );
+          dispatchToContent('HOVER_CLEAR');
           return;
         }
         const info = inspectElementOnHover(el);
         if (info) {
-          window.postMessage(
-            {
-              source: 'URL_TRACKER_PAGE_HOOK',
-              type: 'HOVER_RESULT',
-              payload: info
-            },
-            '*'
-          );
+          dispatchToContent('HOVER_RESULT', info);
         } else {
-          window.postMessage(
-            { source: 'URL_TRACKER_PAGE_HOOK', type: 'HOVER_CLEAR' },
-            '*'
-          );
+          dispatchToContent('HOVER_CLEAR');
         }
       } catch {}
     },

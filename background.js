@@ -3,8 +3,10 @@
 const DEFAULT_ALLOWED_DOMAINS = [];
 const TAB_LOGS = new Map(); // tabId -> Array of log items
 const TAB_HOVER = new Map(); // tabId -> latest hover payload
+const TAB_HOVER_HISTORY = new Map(); // tabId -> 최근 마우스 탐색(호버) URL 목록 (실제 동작 로그와 별도, 비우기 버튼으로만 리셋)
 const POPUP_OWNER_TAB = new Map(); // popupTabId -> parent(owner) tabId
 const MAX_LOGS_PER_TAB = 200;
+const MAX_HOVER_HISTORY_PER_TAB = 5;
 
 let allowedDomains = [...DEFAULT_ALLOWED_DOMAINS];
 let preserveLog = false; // 크롬 DevTools Preserve log (기본값: OFF - 화면 이동 시 자동 리셋)
@@ -115,6 +117,38 @@ function getTabLogs(tabId) {
   return TAB_LOGS.get(tabId);
 }
 
+function getTabHoverHistory(tabId) {
+  return TAB_HOVER_HISTORY.get(tabId) || [];
+}
+
+function pushTabHoverHistory(tabId, payload) {
+  const candidate = payload?.candidates?.[0];
+  const url = String(candidate?.displayUrl || '').trim();
+  if (!url || url === '#') return;
+
+  // 마우스를 다시 올릴 때마다 기록한다. 이미 목록에 있는 URL이면 맨 위로 올리고 재방문 횟수(repeat)를 1 늘린다.
+  // 단, 클릭 직후 실측 URL 반영을 위한 재전송(isRefresh)은 새 진입이 아니므로 이미 있으면 건너뛴다.
+  const history = [...getTabHoverHistory(tabId)];
+  const existingIdx = history.findIndex((item) => item.url === url);
+  if (payload?.isRefresh && existingIdx >= 0) return;
+  let repeat = 0;
+  if (existingIdx >= 0) {
+    repeat = (history[existingIdx].repeat || 0) + 1;
+    history.splice(existingIdx, 1);
+  }
+  history.unshift({
+    url,
+    kind: candidate?.kind || '호버 URL',
+    elementText: payload?.element?.text || payload?.element?.selector || '요소',
+    timestamp: Date.now(),
+    repeat
+  });
+  if (history.length > MAX_HOVER_HISTORY_PER_TAB) {
+    history.length = MAX_HOVER_HISTORY_PER_TAB;
+  }
+  TAB_HOVER_HISTORY.set(tabId, history);
+}
+
 function broadcastToSidePanel(msg) {
   try {
     chrome.runtime.sendMessage(msg).catch(() => {});
@@ -134,7 +168,8 @@ function notifyActiveTabToSidePanel(tab) {
     isDomainAllowed: checkDomainMatch(hostname),
     allowedDomains,
     logs: getTabLogs(tab.id),
-    hover: TAB_HOVER.get(tab.id) || null
+    hover: TAB_HOVER.get(tab.id) || null,
+    hoverHistory: getTabHoverHistory(tab.id)
   });
 }
 
@@ -200,6 +235,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   TAB_LOGS.delete(tabId);
   TAB_HOVER.delete(tabId);
+  TAB_HOVER_HISTORY.delete(tabId);
   POPUP_OWNER_TAB.delete(tabId);
 });
 
@@ -354,10 +390,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return false;
     }
     TAB_HOVER.set(tabId, message.payload);
+    pushTabHoverHistory(tabId, message.payload);
     broadcastToSidePanel({
       type: 'URL_TRACKER_HOVER_UPDATED',
       tabId,
-      payload: message.payload
+      payload: message.payload,
+      hoverHistory: getTabHoverHistory(tabId)
     });
     const firstCandidate = message.payload?.candidates?.[0];
     const firstHoverUrl = firstCandidate?.displayUrl;
@@ -369,12 +407,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             type: 'URL_TRACKER_QUICKBAR_UPDATE',
             url: firstHoverUrl,
             badge: '호버',
-            kind: firstCandidate?.kind || '호버 URL',
-            elementText:
-              message.payload?.element?.text ||
-              message.payload?.element?.selector ||
-              '요소',
-            isHover: true
+            isHover: true,
+            hoverHistory: getTabHoverHistory(tabId)
           },
           { frameId: 0 }
         )
@@ -439,7 +473,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         allowedDomains,
         preserveLog,
         logs: targetId != null ? getTabLogs(targetId) : [],
-        hover: targetId != null ? TAB_HOVER.get(targetId) || null : null
+        hover: targetId != null ? TAB_HOVER.get(targetId) || null : null,
+        hoverHistory: targetId != null ? getTabHoverHistory(targetId) : []
       });
     });
     return true;
@@ -450,12 +485,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const targetId = message.tabId ?? tabId ?? lastActiveWebTabId;
     if (targetId != null) {
       TAB_LOGS.set(targetId, []);
+      TAB_HOVER_HISTORY.delete(targetId);
       broadcastToSidePanel({
         type: 'URL_TRACKER_LOGS_CLEARED',
         tabId: targetId
       });
+      chrome.tabs
+        .sendMessage(targetId, { type: 'URL_TRACKER_HOVER_HISTORY_CLEARED' }, { frameId: 0 })
+        .catch(() => {});
     }
     sendResponse({ ok: true });
+    return false;
+  }
+
+  // 5-1) 하단 퀵 바 로드 시 탭별 최근 호버 이력 복원 (페이지 새로고침 후에도 유지)
+  if (message?.type === 'URL_TRACKER_GET_HOVER_HISTORY') {
+    sendResponse({ hoverHistory: tabId != null ? getTabHoverHistory(tabId) : [] });
     return false;
   }
 

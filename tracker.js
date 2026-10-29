@@ -26,6 +26,7 @@
   const unallowedBanner = document.getElementById('unallowedBanner');
 
   const hoverSection = document.getElementById('hoverSection');
+  const hoverHistoryEl = document.getElementById('hoverHistory');
   const tabAll = document.getElementById('tabAll');
   const tabNav = document.getElementById('tabNav');
   const tabIframe = document.getElementById('tabIframe');
@@ -43,6 +44,7 @@
     domainPanelOpen: false,
     logs: [],
     latestHover: null,
+    hoverHistory: [],
     filterKind: 'ALL',
     searchQuery: '',
     expandedIds: new Set(),
@@ -297,9 +299,11 @@
     state.isDomainAllowed = Boolean(res.isDomainAllowed);
     state.logs = Array.isArray(res.logs) ? res.logs : [];
     state.latestHover = res.hover || null;
+    state.hoverHistory = Array.isArray(res.hoverHistory) ? res.hoverHistory : [];
     syncSettingsUI();
     renderDomainManager();
     renderHoverSection();
+    renderHoverHistory();
     renderLogs();
   });
 
@@ -336,12 +340,14 @@
 
   btnClearLogs.addEventListener('click', () => {
     state.logs = [];
+    state.hoverHistory = [];
     state.expandedIds.clear();
     chrome.runtime.sendMessage({
       type: 'URL_TRACKER_CLEAR_TAB_LOGS',
       tabId: state.activeTabId
     }).catch(() => {});
     renderLogs();
+    renderHoverHistory();
   });
 
   [tabAll, tabNav, tabIframe, tabAjax].forEach((btn) => {
@@ -384,9 +390,11 @@
       state.isDomainAllowed = Boolean(msg.isDomainAllowed);
       state.logs = Array.isArray(msg.logs) ? msg.logs : [];
       state.latestHover = msg.hover || null;
+      state.hoverHistory = Array.isArray(msg.hoverHistory) ? msg.hoverHistory : [];
       state.expandedIds.clear();
       renderDomainManager();
       renderHoverSection();
+      renderHoverHistory();
       renderLogs();
       return;
     }
@@ -421,7 +429,9 @@
       if (state.activeTabId == null) state.activeTabId = msg.tabId;
       if (msg.tabId === state.activeTabId) {
         state.latestHover = msg.payload;
+        if (Array.isArray(msg.hoverHistory)) state.hoverHistory = msg.hoverHistory;
         renderHoverSection();
+        renderHoverHistory();
       }
       return;
     }
@@ -504,6 +514,52 @@
     `;
 
     bindCopyButtons(hoverSection);
+  }
+
+  function formatHoverTime(timestamp) {
+    if (!timestamp) return '';
+    const d = new Date(timestamp);
+    return [d.getHours(), d.getMinutes(), d.getSeconds()]
+      .map((n) => String(n).padStart(2, '0'))
+      .join(':');
+  }
+
+  // 최근 마우스 탐색(호버) URL 5건: 행 클릭 시 해당 URL 복사
+  function renderHoverHistory() {
+    const items = state.hoverHistory || [];
+    if (items.length === 0) {
+      hoverHistoryEl.innerHTML = `
+        <div class="hh-title">🕘 최근 탐색 (0)</div>
+        <div class="hh-empty">아직 마우스로 훑어본 URL이 없습니다.</div>
+      `;
+      return;
+    }
+
+    hoverHistoryEl.innerHTML = `
+      <div class="hh-title">🕘 최근 탐색 (${items.length})</div>
+      ${items
+        .map(
+          (item, idx) => `
+          <div class="hh-item${item.repeat > 0 ? ' repeated' : ''}" title="클릭하면 이 URL을 복사합니다: ${escapeHtml(item.url)}">
+            <span class="hh-idx">#${idx + 1}</span>
+            <span class="hh-el">🎯 ${escapeHtml(item.elementText || '요소')}</span>
+            <span class="click-tag" title="${escapeHtml(item.kind || '호버')}">${escapeHtml(item.kind || '호버')}</span>
+            <span class="hh-url">${escapeHtml(item.url)}</span>
+            ${item.repeat > 0 ? `<span class="hh-repeat" title="포커스 아웃 후 다시 올린 횟수">(${item.repeat})</span>` : ''}
+            <span class="time">${escapeHtml(formatHoverTime(item.timestamp))}</span>
+            <button class="mini-btn" data-copy="${escapeHtml(item.url)}">📋</button>
+          </div>
+        `
+        )
+        .join('')}
+    `;
+
+    bindCopyButtons(hoverHistoryEl);
+    hoverHistoryEl.querySelectorAll('.hh-item').forEach((row) => {
+      row.addEventListener('click', () => {
+        row.querySelector('[data-copy]')?.click();
+      });
+    });
   }
 
   function renderLogs() {
